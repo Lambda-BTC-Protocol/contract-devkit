@@ -30,7 +30,7 @@ export default class ReadAndStore implements Contract {
     });
   }
 
-  read = (args: unknown[]) => {
+  read = ({ args }: ContractParams) => {
     const schema = z.tuple([z.string()]);
     const [from] = argsParsing(schema, args, "read");
     return this.message.get(from) ?? "";

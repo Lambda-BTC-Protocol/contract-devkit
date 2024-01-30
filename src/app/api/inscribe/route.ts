@@ -11,7 +11,7 @@ export async function POST(request: NextRequest) {
   const metadata = {
     sender: sender,
     origin: sender,
-    timestamp: 0,
+    timestamp: new Date().getTime(),
     transactionHash: randomInt(100000).toString(),
     blockNumber: block,
     currentContract: "",
