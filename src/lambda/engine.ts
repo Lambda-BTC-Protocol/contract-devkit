@@ -8,6 +8,7 @@ import { Event } from "@/contracts/types/event";
 import { TransactionLog } from "@/log";
 import { logger } from "@/lambda/global";
 import { WrappedContract } from "@/contracts/utils/contract-wrapper";
+import { createEcosystem } from "@/lambda/create-ecosystem";
 
 export async function engine(inscription: Inscription, metadata: Metadata) {
   console.log("inscription", inscription);
@@ -22,35 +23,7 @@ export async function engine(inscription: Inscription, metadata: Metadata) {
     const params = {
       args,
       metadata: realMetadata,
-      ecosystem: {
-        getContractObj: async <T extends Contract>(contractName: string) => {
-          const contract = persistenceStorage[contractName] as T;
-          beforeCheckpoints.set(contractName, _.cloneDeep(contract));
-          return contractWrapper<T>(contract, {
-            metadata: {
-              ...metadata,
-              currentContract: contractName,
-              sender: realMetadata.currentContract,
-            },
-            ecosystem: {
-              getContractObj: () => {
-                throw new ExecutionError("getContractObj not implemented");
-              },
-              redeployContract: () => {
-                throw new ExecutionError("redeployContract not implemented");
-              },
-            },
-            eventLogger: {
-              log: (event: Omit<Event, "contract">) => {
-                events.push({ ...event, contract: contractName });
-              },
-            },
-          });
-        },
-        redeployContract: () => {
-          throw new ExecutionError("redeployContract not implemented");
-        },
-      },
+      ecosystem: createEcosystem(contractName, metadata),
       eventLogger: {
         log: (event: Omit<Event, "contract">) => {
           events.push({ ...event, contract: contractName });
