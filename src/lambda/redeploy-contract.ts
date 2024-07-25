@@ -1,7 +1,8 @@
 import { DEPLOY_PREFIX } from "@/contracts/utils/DEPLOY_PREFIX";
 import { ExecutionError } from "@/contracts/types/execution-error";
 import { Metadata } from "@/contracts/types/metadata";
-import { deployedContractsStorage } from "@/lambda/global";
+import { persistenceStorage } from "@/persistenceStorage";
+import { loadAndInitContractFromFile } from "@/lambda/load-and-init-contract-from-file";
 
 const fullDeployedContractPathMap = new Map<string, string>();
 
@@ -18,9 +19,8 @@ export async function redeployContract(
     throw new ExecutionError("deploy: name cant be empty");
   if (newContractName.includes("."))
     throw new ExecutionError("deploy: '.' is not allowed in contract name");
-  const inStorage = await deployedContractsStorage.get(
-    fullDeployedContractPath(newContractName),
-  );
+  const inStorage =
+    persistenceStorage[fullDeployedContractPath(newContractName)];
   if (inStorage) {
     throw new ExecutionError(
       `redeploy: this contract name ${newContractName} is already taken!`,
@@ -30,26 +30,6 @@ export async function redeployContract(
     fullDeployedContractPath(newContractName),
     templateContract,
   );
-  await deployedContractsStorage.set(
-    fullDeployedContractPath(newContractName),
-    templateContract,
-    0,
-  );
-}
-
-export async function loadDeployedContractName(
-  deployedContractName: string,
-): Promise<string | null> {
-  if (fullDeployedContractPathMap.has(deployedContractName)) {
-    return fullDeployedContractPathMap.get(deployedContractName)!;
-  }
-  const inStorage = await deployedContractsStorage.get(deployedContractName);
-  if (!inStorage) return null;
-  fullDeployedContractPathMap.set(deployedContractName, inStorage);
-  return inStorage;
-}
-
-export async function removeFromMapAndStorage(deployedContractName: string) {
-  fullDeployedContractPathMap.delete(deployedContractName);
-  await deployedContractsStorage.delete(deployedContractName);
+  persistenceStorage[fullDeployedContractPath(newContractName)] =
+    await loadAndInitContractFromFile(templateContract).then((r) => r!);
 }
