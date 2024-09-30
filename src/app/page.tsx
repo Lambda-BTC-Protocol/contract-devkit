@@ -35,16 +35,29 @@ export default function Home() {
     toast.success("Inscribed");
   };
 
-  const onQuerySubmit = async (data: {
-    contract: string;
-    function: string;
-    args: string;
-  }) => {
-    const args = JSON.parse(data.args);
-    const result = await apiWrapper.query(data.contract, data.function, args);
-    console.log(result);
-    setQueryResult(bigIntJson.stringify(result));
-  };
+const onQuerySubmit = async (data: {
+  contract: string;
+  function: string;
+  args: string | string[]; // Allow either a string or an array of strings
+}) => {
+  let parsedArgs: unknown[];
+
+  if (Array.isArray(data.args)) {
+    parsedArgs = JSON.parse(JSON.stringify(data.args)); // Parse array of strings directly
+  } else {
+    // Handle the case where args is a single string
+    try {
+      parsedArgs = JSON.parse(data.args); // Attempt to parse as a JSON array
+      // If successful, the `args` was a stringified array
+    } catch (e) {
+      // If parsing fails, assume `args` is a single string value
+      parsedArgs = [data.args]; // Wrap it in an array
+    }
+  }
+  const result = await apiWrapper.query(data.contract, data.function, parsedArgs);
+  console.log(result);
+  setQueryResult(bigIntJson.stringify(result));
+};
 
   const inscribeInitial = async () => {
     for (const initialInscription of initialInscriptions) {
@@ -89,10 +102,15 @@ export default function Home() {
           </div>
         </form>
         <h3 className="text-xl mt-2">Examples</h3>
-        <p>{`{ "p": "lam", "op": "call", "contract": "proto", "function": "mint", "args": [ 10000 ] }`}</p>
-        <p>{`{ "p": "lam", "op": "call", "contract": "proto", "function": "transfer", "args": [ "walletB", 10000 ] }`}</p>
-        <p>{`{ "p": "lam", "op": "call", "contract": "pusd", "function": "mint", "args": [ 1000000000 ] }`}</p>
-        <p>{`{ "p": "lam", "op": "call", "contract": "pusd", "function": "transfer", "args": [ "walletB", 1200000 ] }`}</p>
+        <p>{`{ "p": "lam", "op": "call", "contract": "bitcoin", "function": "mint", "args": [ "walletA", "100000000" ] } - sender: protocol`}</p>
+        <p>{`{ "p": "lam", "op": "call", "contract": "proto", "function": "mint", "args": [ "100000000" ] } - sender: walletA`}</p>
+        <p>{`{ "p": "lam", "op": "call", "contract": "bitcoin", "function": "approve", "args": [ "uniV2Router", "1000000000" ] } - sender: walletA`}</p>
+        <p>{`{ "p": "lam", "op": "call", "contract": "proto", "function": "approve", "args": [ "uniV2Router", "1000000000" ] } - sender: walletA`}</p>
+        <p>{`{ "p": "lam", "op": "call", "contract": "uniV2Router", "function": "addLiquidity", "args": [ "bitcoin", "proto", 100, 100, 0, 0, "walletA", 1000000000000 ] } - sender: walletA`}</p>
+
+        <p>{`{ "p": "lam", "op": "call", "contract": "pool", "function": "deposit", "args": [ "bitcoin", "10000", "walletA" ] } - sender: walletA`}</p>
+        <p>{`{ "p": "lam", "op": "call", "contract": "pool", "function": "withdraw", "args": [ "bitcoin", 10000, "walletA" ] }`}</p>
+        <p>{`{ "p": "lam", "op": "call", "contract": "pool", "function": "borrow", "args": [ "bitcoin", 10000, 1.5, "walletA" ] }`}</p>
       </section>
       <section className="flex flex-col gap-2">
         <h2 className="text-3xl">Query</h2>

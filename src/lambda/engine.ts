@@ -65,7 +65,7 @@ export async function engine(inscription: Inscription, metadata: Metadata) {
   }
 }
 
-const contractWrapper = <T extends Contract>(
+export const contractWrapper = <T extends Contract>(
   contract: T,
   params: Omit<ContractParams, "args">,
 ): WrappedContract<T> => {

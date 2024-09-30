@@ -1,6 +1,17 @@
 import { Inscription } from "@/inscription";
+import { sendError } from "next/dist/server/api-utils";
 
 export const initialInscriptions = [
+  {
+    inscription: JSON.stringify({
+      p: "lam",
+      op: "call",
+      contract: "bitcoin",
+      function: "mint",
+      args: ["walletA", "100000000"],
+    } satisfies Inscription),
+    sender: "protocol", // mock funds
+  },
   {
     inscription: JSON.stringify({
       p: "lam",
@@ -9,7 +20,7 @@ export const initialInscriptions = [
       function: "mint",
       args: ["100000000"],
     } satisfies Inscription),
-    sender: "walletA",
+    sender: "walletA", // mock funds
   },
   {
     inscription: JSON.stringify({
@@ -17,7 +28,7 @@ export const initialInscriptions = [
       op: "call",
       contract: "proto",
       function: "approve",
-      args: ["move", "1"],
+      args: ["pool", "1000000000"],
     } satisfies Inscription),
     sender: "walletA",
   },
@@ -25,10 +36,20 @@ export const initialInscriptions = [
     inscription: JSON.stringify({
       p: "lam",
       op: "call",
-      contract: "move",
-      function: "moveFrom",
-      args: ["walletA", "proto"],
+      contract: "tokenManager",
+      function: "addToken",
+      args: ["proto", "1000000000"],
     } satisfies Inscription),
-    sender: "walletB",
+    sender: "walletA",
+  },
+  {
+    inscription: JSON.stringify({
+      p: "lam",
+      op: "call",
+      contract: "pool",
+      function: "deposit",
+      args: ["proto", "10000", "walletA"],
+    } satisfies Inscription),
+    sender: "walletA",
   },
 ];
