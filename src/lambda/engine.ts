@@ -45,7 +45,7 @@ export async function engine(inscription: Inscription, metadata: Metadata) {
       } satisfies TransactionLog;
 
       logger.addLog(log);
-      console.log(persistenceStorage);
+      // console.log(persistenceStorage);
     } catch (e: any) {
       console.error(e);
       // reset state
@@ -65,7 +65,7 @@ export async function engine(inscription: Inscription, metadata: Metadata) {
   }
 }
 
-export const contractWrapper = <T extends Contract>(
+const contractWrapper = <T extends Contract>(
   contract: T,
   params: Omit<ContractParams, "args">,
 ): WrappedContract<T> => {

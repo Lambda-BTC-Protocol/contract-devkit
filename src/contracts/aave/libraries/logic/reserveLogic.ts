@@ -1,5 +1,5 @@
-import { ReserveData } from "@/contracts/lendingPool";
 import { MathUtils } from "../math/mathUtils";
+import { ReserveData } from "../types/dataTypes";
 
 // Main GenericLogic class
 export class ReserveLogic {

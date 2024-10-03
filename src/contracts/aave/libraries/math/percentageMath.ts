@@ -28,7 +28,9 @@ export class PercentageMath {
       throw new Error(Errors.MATH_MULTIPLICATION_OVERFLOW);
     }
 
-    return Math.floor((value * percentage + this.HALF_PERCENT) / this.PERCENTAGE_FACTOR);
+    return Math.floor(
+      (value * percentage + this.HALF_PERCENT) / this.PERCENTAGE_FACTOR
+    );
   }
 
   /**

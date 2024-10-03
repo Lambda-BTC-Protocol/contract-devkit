@@ -7,7 +7,8 @@ import { ExtendedMap } from "./utils/extended-map";
 import { ExecutionError } from "./types/execution-error";
 import { LRC20Base } from "./standards/base/LRC20Base";
 import UniV2FactoryContract from "./uniV2Factory";
-import { BigNumber } from 'typescript-bignumber'
+import { loadContract } from "@/lib/utils";
+import { EventTypes } from "./aave/libraries/types/dataTypes";
 
 export default class UniV2Pair implements Contract {
   activeOn: 100;
@@ -15,7 +16,6 @@ export default class UniV2Pair implements Contract {
   _allowance = new Map<string, Map<string, bigint>>();
   _balance = new ExtendedMap<string, bigint>();
 
-  private provider?: any;
   private _factory: string;
   private _token0: string;
   private _token1: string;
@@ -104,12 +104,13 @@ export default class UniV2Pair implements Contract {
     });
   }
 
-  min(args: bigint[]) { return args.reduce((m, e) => e < m ? e : m) };
-
+  min(args: bigint[]) {
+    return args.reduce((m, e) => (e < m ? e : m));
+  }
 
   sqrt(value: bigint) {
     if (value < 0n) {
-      throw 'square root of negative numbers is not supported'
+      throw "square root of negative numbers is not supported";
     }
 
     if (value < 2n) {
@@ -117,8 +118,8 @@ export default class UniV2Pair implements Contract {
     }
 
     function newtonIteration(n: any, x0: any) {
-      const x1 = ((n / x0) + x0) >> 1n;
-      if (x0 === x1 || x0 === (x1 - 1n)) {
+      const x1 = (n / x0 + x0) >> 1n;
+      if (x0 === x1 || x0 === x1 - 1n) {
         return x0;
       }
       return newtonIteration(n, x1);
@@ -139,17 +140,16 @@ export default class UniV2Pair implements Contract {
     // Get reserves
     const [_reserve0, _reserve1] = await this.getReserves();
     // Get token balances
-    const token0Contract = await ecosystem.getContractObj<LRC20Base>(
+    const token0Contract = await loadContract<LRC20Base>(
+      ecosystem,
       this._token0
     );
 
-    const token1Contract = await ecosystem.getContractObj<LRC20Base>(
+    const token1Contract = await loadContract<LRC20Base>(
+      ecosystem,
       this._token1
     );
 
-    if (!token0Contract || !token1Contract) {
-      throw new ExecutionError("Burn: cannot get token");
-    }
     const balance0 = await token0Contract.balanceOf([metadata.currentContract]);
     const balance1 = await token1Contract.balanceOf([metadata.currentContract]);
     const amount0 = balance0 - _reserve0;
@@ -164,7 +164,7 @@ export default class UniV2Pair implements Contract {
     } else {
       liquidity = this.min([
         (amount0 * _totalSupply) / _reserve0,
-        (amount1 * _totalSupply) / _reserve1
+        (amount1 * _totalSupply) / _reserve1,
       ]);
     }
     if (liquidity <= 0n) {
@@ -212,10 +212,12 @@ export default class UniV2Pair implements Contract {
     const [_reserve0, _reserve1] = await this.getReserves();
 
     // Get token balances
-    const token0Contract = await ecosystem.getContractObj<LRC20Base>(
+    const token0Contract = await loadContract<LRC20Base>(
+      ecosystem,
       this._token0
     );
-    const token1Contract = await ecosystem.getContractObj<LRC20Base>(
+    const token1Contract = await loadContract<LRC20Base>(
+      ecosystem,
       this._token1
     );
 
@@ -336,7 +338,11 @@ export default class UniV2Pair implements Contract {
     return a / b;
   }
 
-  public async update({ metadata, args }: ContractParams): Promise<void> {
+  public async update({
+    metadata,
+    args,
+    eventLogger,
+  }: ContractParams): Promise<void> {
     const schema = z.tuple([zUtils.bigint(), zUtils.bigint()]);
     const [balance0, balance1] = argsParsing(schema, args, "update");
 
@@ -360,9 +366,10 @@ export default class UniV2Pair implements Contract {
     this._reserve1 = balance1;
     this._blockTimestampLast = blockTimestamp;
 
-    console.log(
-      `Sync event: reserve0 = ${this._reserve0}, reserve1 = ${this._reserve1}`
-    );
+    eventLogger.log({
+      type: EventTypes.UPDATED,
+      message: `Sync event: reserve0 = ${this._reserve0}, reserve1 = ${this._reserve1}`,
+    });
   }
 
   private async _update(
@@ -390,10 +397,6 @@ export default class UniV2Pair implements Contract {
     this._reserve0 = balance0;
     this._reserve1 = balance1;
     this._blockTimestampLast = Number(blockTimestamp);
-
-    console.log(
-      `Sync event: reserve0 = ${this._reserve0}, reserve1 = ${this._reserve1}`
-    );
   }
 
   async swap({
@@ -430,21 +433,18 @@ export default class UniV2Pair implements Contract {
       await this.transferLogic(token1, to, amount1Out, eventLogger);
     }
     // Get token balances
-    const token0Contract = await ecosystem.getContractObj<LRC20Base>(
+    const token0Contract = await loadContract<LRC20Base>(
+      ecosystem,
       this._token0
     );
-    const token1Contract = await ecosystem.getContractObj<LRC20Base>(
+    const token1Contract = await loadContract<LRC20Base>(
+      ecosystem,
       this._token1
     );
-    const factoryContract =
-      await ecosystem.getContractObj<UniV2FactoryContract>(this._factory);
-
-    if (!token0Contract || !token1Contract || !factoryContract) {
-      throw new ExecutionError("Swap: cannot get token");
-    }
-    if (!factoryContract) {
-      throw new ExecutionError("Swap: cannot get factory");
-    }
+    const factoryContract = await loadContract<UniV2FactoryContract>(
+      ecosystem,
+      this._factory
+    );
 
     const balance0 = await token0Contract.balanceOf([metadata.origin]);
     const balance1 = await token1Contract.balanceOf([metadata.origin]);

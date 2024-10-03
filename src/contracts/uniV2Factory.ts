@@ -7,6 +7,8 @@ import { zUtils } from "./utils/zod";
 import { Ecosystem } from "./types/ecosystem";
 import { Metadata } from "./types/metadata";
 import UniV2Pair from "./uniV2Pair";
+import { EventTypes } from "./aave/libraries/types/dataTypes";
+import { loadContract } from "@/lib/utils";
 
 export default class UniV2Factory implements Contract {
   activeOn = 100;
@@ -17,15 +19,11 @@ export default class UniV2Factory implements Contract {
   getPair: ExtendedMap<string, ExtendedMap<string, string>>;
   allPairs: string[];
 
-  constructor(
-    feeToSetter: string,
-    defaultMintFee: bigint,
-    defaultSwapFee: bigint
-  ) {
+  constructor() {
     this.feeTo = "";
-    this.feeToSetter = feeToSetter;
-    this.defaultMintFee = defaultMintFee;
-    this.defaultSwapFee = defaultSwapFee;
+    this.feeToSetter = "";
+    this.defaultMintFee = 5n;
+    this.defaultSwapFee = 5n;
     this.getPair = new ExtendedMap();
     this.allPairs = [];
     //TODO: remove created pairs
@@ -34,7 +32,7 @@ export default class UniV2Factory implements Contract {
     this.initHardcodePairs("uniV2Factory-LP-proto/pusd", "proto", "pusd");
   }
 
-  initHardcodePairs(pair:string, token0:string, token1:string){
+  initHardcodePairs(pair: string, token0: string, token1: string) {
     if (!this.getPair.has(token0)) {
       this.getPair.set(token0, new ExtendedMap<string, string>());
     }
@@ -46,8 +44,6 @@ export default class UniV2Factory implements Contract {
     this.getPair.get(token1)!.set(token0, pair);
 
     this.allPairs.push(pair);
-
-    
   }
 
   async initialize({ metadata, args, eventLogger }: ContractParams) {
@@ -62,9 +58,10 @@ export default class UniV2Factory implements Contract {
     this.defaultMintFee = defaultMintFee;
     this.defaultSwapFee = defaultSwapFee;
 
-    console.log(
-      `Initialized Factory with feeToSetter: ${this.feeToSetter}, defaultMintFee: ${this.defaultMintFee}, defaultSwapFee: ${this.defaultSwapFee}`
-    );
+    eventLogger.log({
+      type: EventTypes.INITIALIZED,
+      message: `Initialized Factory with feeToSetter: ${this.feeToSetter}, defaultMintFee: ${this.defaultMintFee}, defaultSwapFee: ${this.defaultSwapFee}`,
+    });
   }
 
   async allPairsLength(): Promise<number> {
@@ -148,15 +145,14 @@ export default class UniV2Factory implements Contract {
   ): Promise<string> {
     // This is where you'd simulate contract deployment
     const pairAddress = `${metadata.currentContract}-LP-${token0}/${token1}`;
-    const res = await ecosystem.redeployContract("uniV2Pair", pairAddress);
-    console.log(
-      `Deployed pair contract for ${token0} and ${token1} at address ${pairAddress}`
+    await ecosystem.redeployContract("uniV2Pair", pairAddress);
+
+    const pairContract = await loadContract<UniV2Pair>(
+      ecosystem,
+      `dep:${pairAddress}`
     );
-    const pairContract = await ecosystem.getContractObj<UniV2Pair>(`dep:${pairAddress}`)
-    if(!pairContract){
-      throw new ExecutionError("UniswapV2Factory: Cannot get pair contract");
-    }
-    await pairContract.initialize([token0, token1])
+
+    await pairContract.initialize([token0, token1]);
     return pairAddress;
   }
 
@@ -178,7 +174,6 @@ export default class UniV2Factory implements Contract {
     }
 
     this.feeTo = newFeeTo;
-    console.log(`FeeTo address set to: ${newFeeTo}`);
   }
 
   async setFeeToSetter({ metadata, args }: ContractParams): Promise<void> {
@@ -190,7 +185,6 @@ export default class UniV2Factory implements Contract {
     }
 
     this.feeToSetter = newFeeToSetter;
-    console.log(`FeeToSetter address set to: ${newFeeToSetter}`);
   }
 
   async setMintFee({ metadata, args }: ContractParams): Promise<void> {
@@ -206,23 +200,9 @@ export default class UniV2Factory implements Contract {
     }
 
     this.getPair.get(pair)!.set(pair, mintFee.toString());
-    console.log(`Mint fee for pair ${pair} set to: ${mintFee}`);
   }
 
   async getPairs({ metadata, args }: ContractParams) {
-    // const schema = z.tuple([z.string(), z.string()]);
-    // const [tokenA, swapFee] = argsParsing(schema, args, "setSwapFee");
-
-    // if (metadata.sender !== this.feeToSetter) {
-    //   throw new ExecutionError("UniswapV2: FORBIDDEN");
-    // }
-
-    // if (!this.getPair.has(pair)) {
-    //   throw new ExecutionError("UniswapV2: PAIR_NOT_EXISTS");
-    // }
-
-    // this.getPair.get(pair)!.set(pair, swapFee.toString());
-    // console.log(`Swap fee for pair ${pair} set to: ${swapFee}`);
     return Array.from(this.getPair);
   }
 
@@ -239,7 +219,6 @@ export default class UniV2Factory implements Contract {
     }
 
     this.getPair.get(pair)!.set(pair, swapFee.toString());
-    console.log(`Swap fee for pair ${pair} set to: ${swapFee}`);
   }
 
   async setDefaultMintFee({ metadata, args }: ContractParams): Promise<void> {
@@ -251,7 +230,6 @@ export default class UniV2Factory implements Contract {
     }
 
     this.defaultMintFee = defaultMintFee;
-    console.log(`Default mint fee set to: ${defaultMintFee}`);
   }
 
   async setDefaultSwapFee({ metadata, args }: ContractParams): Promise<void> {
@@ -263,6 +241,5 @@ export default class UniV2Factory implements Contract {
     }
 
     this.defaultSwapFee = defaultSwapFee;
-    console.log(`Default swap fee set to: ${defaultSwapFee}`);
   }
 }

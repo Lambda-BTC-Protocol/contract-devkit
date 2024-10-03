@@ -8,7 +8,6 @@ import { ContractParams } from "@/contracts/types/contract";
 import { zUtils } from "@/contracts/utils/zod";
 
 export default class Bitcoin extends LRC20Base {
-  activeOn = 100;
   _protocolWallet = "protocol";
 
   constructor() {
@@ -21,7 +20,7 @@ export default class Bitcoin extends LRC20Base {
 
     if (metadata.sender !== this._protocolWallet) {
       throw new ExecutionError(
-        "payProtocolFees: only protocol wallet can do this"
+        "payProtocolFees: only protocol wallet can do this",
       );
     }
     const fromBefore = this._balance.get(from) ?? 0n;
@@ -42,14 +41,14 @@ export default class Bitcoin extends LRC20Base {
   protected async mintLogic(
     args: unknown[],
     metadata: Metadata,
-    eventLogger: EventLogger
+    eventLogger: EventLogger,
   ) {
     const schema = z.tuple([z.string(), zUtils.bigint()]);
     const [to, amount] = argsParsing(schema, args, "mint");
 
     if (metadata.sender !== this._protocolWallet)
       throw new ExecutionError(
-        "mint: only the protocol wallet can mint bitcoin"
+        "mint: only the protocol wallet can mint bitcoin",
       );
 
     this._balance.update(to, 0n, (balance) => balance + amount);

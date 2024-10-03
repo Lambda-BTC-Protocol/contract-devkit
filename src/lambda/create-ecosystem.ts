@@ -30,7 +30,7 @@ export function createEcosystem(
       newContractName: string,
     ): Promise<WrappedContract<T>> => {
       await redeployContract(templateContract, newContractName, metadata);
-      const eventLogger: EventLogger = { log: () => { } };
+      const eventLogger: EventLogger = { log: () => {} };
       eventLogger.log({
         type: "DEPLOY",
         message: `contract '${DEPLOY_PREFIX}${newContractName}' has been deployed!`,
@@ -51,9 +51,7 @@ async function createWrappedContractObject<T extends Contract>(
   metadata: Metadata,
   callerContractName: string,
 ): Promise<WrappedContract<T> | null> {
-
   // check if contract is already loaded in memory, otherwise load it from file. contracts acts as a buffer for uncommitted changes
-  console.log(toExecuteContractName)
   const contractObj = persistenceStorage[toExecuteContractName] as T | null;
   if (contractObj === null) return null;
 
@@ -71,6 +69,6 @@ async function createWrappedContractObject<T extends Contract>(
       sender: callerContractName,
     },
     ecosystem: createEcosystem(toExecuteContractName, metadata),
-    eventLogger: { log: () => { } },
+    eventLogger: { log: () => {} },
   });
 }

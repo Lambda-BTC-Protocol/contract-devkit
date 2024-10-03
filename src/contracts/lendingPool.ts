@@ -3,481 +3,114 @@ import { zUtils } from "./utils/zod";
 import { z } from "zod";
 import { argsParsing } from "./utils/args-parsing";
 import { ExecutionError } from "./types/execution-error";
-import { persistenceStorage } from "../persistenceStorage";
-import aToken, { aToken as aTokenTemplate } from "./aToken";
 import { LRC20Base } from "./standards/base/LRC20Base";
-import TokenManager from "./tokenManager";
 import { Ecosystem } from "./types/ecosystem";
-import { DEPLOY_PREFIX } from "./utils/DEPLOY_PREFIX";
-import { getAToken } from "./utils/token-manager";
-import { on } from "events";
-import { VariableDebtToken } from "./variableDebtToken";
-import { UserConfiguration } from "./libraries/configuration/userConfiguration";
-import { ReserveConfiguration } from "./libraries/configuration/reserveConfiguration";
-import { ValidationLogic } from "./libraries/logic/validationLogic";
+import { UserConfiguration } from "./aave/libraries/configuration/userConfiguration";
+import { ReserveConfiguration } from "./aave/libraries/configuration/reserveConfiguration";
+import { ValidationLogic } from "./aave/libraries/logic/validationLogic";
+import { ReserveLogic } from "./aave/libraries/logic/reserveLogic";
+import { Errors } from "./aave/libraries/helpers/errors";
+import { reserveConfigSchema } from "./aave/libraries/types/zod";
+import { loadContract } from "@/lib/utils";
+import {
+  EventTypes,
+  InterestRateMode,
+  ReserveData,
+} from "./aave/libraries/types/dataTypes";
+import { Helpers } from "./aave/libraries/helpers/helpers";
 import Oracle from "./oracle";
-import { ReserveLogic } from "./libraries/logic/reserveLogic";
-import { MathUtils } from "./libraries/math/mathUtils";
 import StableDebtToken from "./stableDebtToken";
-import { WadRayMath } from "./libraries/math/wadRayMath";
-import { PercentageMath } from "./libraries/math/percentageMath";
+import VariableDebtToken from "./variableDebtToken";
+import AToken from "./aToken";
 
-export class ReserveData {
-  configuration: ReserveConfiguration;
-  liquidityIndex: bigint;
-  variableBorrowIndex: bigint;
-  currentLiquidityRate: bigint;
-  currentVariableBorrowRate: bigint;
-  currentStableBorrowRate: bigint;
-  lastUpdateTimestamp: number;
-  aTokenAddress: string;
-  stableDebtTokenAddress: string;
-  variableDebtTokenAddress: string;
-  interestRateStrategyAddress: string;
-  id: number;
-
-  constructor(
-    configuration: ReserveConfiguration,
-    liquidityIndex: bigint,
-    variableBorrowIndex: bigint,
-    currentLiquidityRate: bigint,
-    currentVariableBorrowRate: bigint,
-    currentStableBorrowRate: bigint,
-    lastUpdateTimestamp: number,
-    aTokenAddress: string,
-    stableDebtTokenAddress: string,
-    variableDebtTokenAddress: string,
-    interestRateStrategyAddress: string,
-    id: number
-  ) {
-    (this.configuration = configuration),
-      (this.liquidityIndex = liquidityIndex),
-      (this.variableBorrowIndex = variableBorrowIndex),
-      (this.currentLiquidityRate = currentLiquidityRate),
-      (this.currentVariableBorrowRate = currentVariableBorrowRate),
-      (this.currentStableBorrowRate = currentStableBorrowRate),
-      (this.lastUpdateTimestamp = lastUpdateTimestamp),
-      (this.aTokenAddress = aTokenAddress),
-      (this.stableDebtTokenAddress = stableDebtTokenAddress),
-      (this.variableDebtTokenAddress = variableDebtTokenAddress),
-      (this.interestRateStrategyAddress = interestRateStrategyAddress);
-    this.id = id;
-  }
-
-  /**
-   * @dev Updates the liquidity cumulative index and the variable borrow index.
-   * @param reserve The reserve object
-   **/
-  async updateState( ecosystem: Ecosystem ) {
-    const variableDebtToken = await ecosystem.getContractObj<VariableDebtToken>(
-      this.variableDebtTokenAddress
-    );
-    if (!variableDebtToken) {
-      throw new ExecutionError(
-        `VariableDebtToken ${this.variableDebtTokenAddress} not found`
-      );
-    }
-    const scaledVariableDebt = variableDebtToken.scaledTotalSupply([]);
-    const previousVariableBorrowIndex = this.variableBorrowIndex;
-    const previousLiquidityIndex = this.liquidityIndex;
-    const lastUpdatedTimestamp = this.lastUpdateTimestamp;
-
-    const [newLiquidityIndex, newVariableBorrowIndex] = this._updateIndexes(
-      this,
-      scaledVariableDebt,
-      previousLiquidityIndex,
-      previousVariableBorrowIndex,
-      lastUpdatedTimestamp
-    );
-
-    this._mintToTreasury(
-      this,
-      scaledVariableDebt,
-      previousVariableBorrowIndex,
-      newLiquidityIndex,
-      newVariableBorrowIndex,
-      lastUpdatedTimestamp,
-      ecosystem
-    );
-  }
-
-  async _mintToTreasury(
-    reserve: ReserveData,
-    scaledVariableDebt: bigint,
-    previousVariableBorrowIndex: bigint,
-    newLiquidityIndex: bigint,
-    newVariableBorrowIndex: bigint,
-    timestamp: number,
-    ecosystem: Ecosystem
-  ): Promise<void> {
-    const reserveFactor = reserve.configuration.getReserveFactor();
-
-    if (reserveFactor === 0n) {
-      return;
-    }
-
-    const stableDeptsToken = await ecosystem.getContractObj<StableDebtToken>(
-      reserve.stableDebtTokenAddress
-    );
-
-    if (!stableDeptsToken) {
-      throw new ExecutionError(
-        `StableDebtToken ${reserve.stableDebtTokenAddress} not found`
-      );
-    }
-
-    const {
-      totalSupply: principalStableDebt,
-      calcTotalSupply: currentStableDebt,
-      avgRate: avgStableRate,
-      lastUpdateTimestamp: stableSupplyUpdatedTimestamp,
-    } = stableDeptsToken.getSupplyData([]);
-
-    const previousVariableDebt =
-      (scaledVariableDebt * previousVariableBorrowIndex) / WadRayMath.RAY;
-    const currentVariableDebt =
-      (scaledVariableDebt * newVariableBorrowIndex) / WadRayMath.RAY;
-    const cumulatedStableInterest = MathUtils.calculateCompoundedInterest(
-      avgStableRate,
-      stableSupplyUpdatedTimestamp
-    );
-
-    const previousStableDebt =
-      (principalStableDebt * cumulatedStableInterest) / WadRayMath.RAY;
-    const totalDebtAccrued =
-      currentVariableDebt +
-      currentStableDebt +
-      previousVariableDebt -
-      previousStableDebt;
-    const amountToMint =
-      (totalDebtAccrued * reserveFactor) /
-      BigInt(PercentageMath.PERCENTAGE_FACTOR);
-
-    if (amountToMint !== 0n) {
-      const aToken = await ecosystem.getContractObj<aToken>(
-        reserve.aTokenAddress
-      );
-      if (!aToken) {
-        throw new Error("aToken not found");
-      }
-      // await IAToken(reserve.aTokenAddress).mintToTreasury(
-      //   amountToMint,
-      //   newLiquidityIndex
-      // );
-    }
-  }
-  private _updateIndexes(
-    reserve: ReserveData,
-    scaledVariableDebt: bigint,
-    liquidityIndex: bigint,
-    variableBorrowIndex: bigint,
-    timestamp: number
-  ): [bigint, bigint] {
-    const currentLiquidityRate = reserve.currentLiquidityRate;
-
-    let newLiquidityIndex = liquidityIndex;
-    let newVariableBorrowIndex = variableBorrowIndex;
-
-    // Only cumulating if there is any income being produced
-    if (currentLiquidityRate > 0) {
-      const cumulatedLiquidityInterest = MathUtils.calculateLinearInterest(
-        currentLiquidityRate,
-        timestamp
-      );
-      newLiquidityIndex *= cumulatedLiquidityInterest;
-
-      // Check for overflow
-      if (newLiquidityIndex > Number.MAX_SAFE_INTEGER) {
-        throw new Error("Liquidity index overflow");
-      }
-
-      reserve.liquidityIndex = newLiquidityIndex;
-
-      // Ensure that there is actual variable debt before accumulating
-      if (scaledVariableDebt !== 0n) {
-        const cumulatedVariableBorrowInterest =
-          MathUtils.calculateCompoundedInterest(
-            reserve.currentLiquidityRate,
-            timestamp
-          );
-        newVariableBorrowIndex *= cumulatedVariableBorrowInterest;
-
-        // Check for overflow
-        if (newVariableBorrowIndex > Number.MAX_SAFE_INTEGER) {
-          throw new Error("Variable borrow index overflow");
-        }
-        reserve.variableBorrowIndex = newVariableBorrowIndex;
-      }
-    }
-
-    reserve.lastUpdateTimestamp = Date.now();
-    return [newLiquidityIndex, newVariableBorrowIndex];
-  }
-  // async updateState({
-  //   metadata,
-  //   args,
-  //   eventLogger,
-  //   ecosystem,
-  // }: ContractParams) {
-  //   const variableDebtToken = await ecosystem.getContractObj<VariableDebtToken>(
-  //     this.variableDebtTokenAddress
-  //     // scaledVariableDebt =
-  //     //   IVariableDebtToken(reserve.variableDebtTokenAddress).scaledTotalSupply();
-  //   );
-  // }
-  // uint256 previousVariableBorrowIndex = reserve.variableBorrowIndex;
-  //     uint256 previousLiquidityIndex = reserve.liquidityIndex;
-  //     uint40 lastUpdatedTimestamp = reserve.lastUpdateTimestamp;
-
-  //     (uint256 newLiquidityIndex, uint256 newVariableBorrowIndex) =
-  //       _updateIndexes(
-  //         reserve,
-  //         scaledVariableDebt,
-  //         previousLiquidityIndex,
-  //         previousVariableBorrowIndex,
-  //         lastUpdatedTimestamp
-  //       );
-
-  //     _mintToTreasury(
-  //       reserve,
-  //       scaledVariableDebt,
-  //       previousVariableBorrowIndex,
-  //       newLiquidityIndex,
-  //       newVariableBorrowIndex,
-  //       lastUpdatedTimestamp
-  //     );
-  //   }
-}
 export default class LendingPool implements Contract {
   activeOn = 100;
-
-  private _tokenBalances = new Map<string, Map<string, bigint>>();
   private _totalBalances = new Map<string, bigint>();
   private _borrowedBalances = new Map<string, Map<string, bigint>>();
   private _collateralBalances = new Map<string, bigint>();
   private _collateralFactor = 1.5;
   private _healthFactor = new Map<string, bigint>();
-  // private _reserveConfiguration = new Map<ReserveData, ReserveConfigurationMap>();
+  private _lendingPoolConfigurator: string = "lendingPoolConfigurator";
   private _reserves = new Map<string, ReserveData>();
+  private _reservesCount: number = 0;
+  private _reservesList: string[] = [];
   private _usersConfig = new Map<string, UserConfiguration>();
   private _validationLogic = new ValidationLogic();
   private _reserveLogic = new ReserveLogic();
   private _maxStableRateBorrowSizePercent = 2500n;
   private _flashLoanPremiumTotal = 9;
   private _maxNumberOfReserves = 128;
+  private _priceOracle = "oracle";
 
-  async validateDeposit(reserve: ReserveData, amount: bigint) {
-    const reserveConfig = reserve.configuration;
-    if (!reserveConfig) {
-      throw new ExecutionError("Reserve not found");
+  private _onlyLendingPoolConfigurator(sender: string) {
+    if (sender !== this._lendingPoolConfigurator) {
+      throw new Error("Only LendingPoolConfigurator can call this function");
     }
-    if (amount <= 0n) {
-      throw new ExecutionError("Invalid amount");
-    }
-    if (!reserveConfig.getActive()) {
-      throw new ExecutionError("Reserve is not active");
-    }
-    if (reserveConfig.getFrozen()) {
-      throw new ExecutionError("Reserve is frozen");
-    }
-  }
-
-  async configureReserve({ args }: ContractParams) {
-    const schema = z.tuple([
-      z.string(),
-      zUtils.bigint(),
-      zUtils.bigint(),
-      zUtils.bigint(),
-      z.bigint(),
-      z.boolean(),
-      z.boolean(),
-      z.boolean(),
-      z.boolean(),
-      zUtils.bigint(),
-      zUtils.bigint(),
-      zUtils.bigint(),
-      zUtils.bigint(),
-      zUtils.bigint(),
-      zUtils.bigint(),
-      z.number(),
-      z.string(),
-      z.string(),
-      z.string(),
-      z.number(),
-    ]);
-    const [
-      reserve,
-      ltv,
-      liquidationThreshold,
-      liquidationBonus,
-      decimals,
-      isActive,
-      isFrozen,
-      borrowingEnabled,
-      stableRateBorrowingEnabled,
-      reserveFactor,
-      liquidityIndex,
-      variableBorrowIndex,
-      currentLiquidityRate,
-      currentVariableBorrowRate,
-      currentStableBorrowRate,
-      lastUpdateTimestamp,
-      stableDebtTokenAddress,
-      variableDebtTokenAddress,
-      interestRateStrategyAddress,
-      id,
-    ] = argsParsing(schema, args, "configureReserve");
-    const reserveConfig = new ReserveConfiguration(
-      ltv,
-      liquidationThreshold,
-      liquidationBonus,
-      decimals,
-      reserveFactor,
-      isActive,
-      isFrozen,
-      borrowingEnabled,
-      stableRateBorrowingEnabled
-    );
-    const reserveData = new ReserveData(
-      reserveConfig,
-      liquidityIndex,
-      variableBorrowIndex,
-      currentLiquidityRate,
-      currentVariableBorrowRate,
-      currentStableBorrowRate,
-      lastUpdateTimestamp,
-      getAToken(reserve),
-      stableDebtTokenAddress,
-      variableDebtTokenAddress,
-      interestRateStrategyAddress,
-      id
-    );
-    this._reserves.set(reserve, reserveData);
   }
 
   /**
-   * deposit tokens to the lending pool, gives aTokens in return
-   * @param metadata - Metadata of the contract
-   * @param args - Arguments for the contract
-   * @param eventLogger - Event logger
-   * @param ecosystem - Ecosystem
-   */
+   * @dev Sets the configuration bitmap of the reserve as a whole
+   * - Only callable by the LendingPoolConfigurator contract
+   * @param asset The address of the underlying asset of the reserve
+   * @param configuration The new configuration bitmap
+   **/
+  async setConfiguration({ metadata, args }: ContractParams) {
+    this._onlyLendingPoolConfigurator(metadata.sender);
 
-  async deposit({ metadata, args, eventLogger, ecosystem }: ContractParams) {
-    const schema = z.tuple([z.string(), zUtils.bigint(), z.string()]);
-    const [token, amount, onBehalfOf] = argsParsing(schema, args, "deposit");
-    const reserve = this._reserves.get(token);
+    const schema = z.tuple([z.string(), reserveConfigSchema]);
+    const [asset, configruation] = argsParsing(
+      schema,
+      args,
+      "setConfiguration"
+    );
+
+    const reserve = this._reserves.get(asset);
+
     if (!reserve) {
-      throw new ExecutionError("Reserve not found");
+      throw new Error("Reserve not found");
     }
-    await this.validateDeposit(reserve, amount);
-    // await reserve.updateState();
-    const aToken = await ecosystem.getContractObj<aTokenTemplate>(
-      reserve.aTokenAddress
-    );
-
-    if (!aToken) {
-      throw new ExecutionError(
-        `a${token} contract not found or failed to deploy`
-      );
-    }
-
-    const Token = await ecosystem.getContractObj<LRC20Base>(token);
-    if (!Token) throw new ExecutionError(`${token} contract not found`);
-
-    await Token.transferFrom([
-      metadata.sender,
-      metadata.currentContract,
-      amount,
-    ]);
-
-    const totalBalance = this._totalBalances.get(token) ?? 0n;
-    this._totalBalances.set(token, totalBalance + amount);
-
-    await aToken.mint([onBehalfOf, amount]);
-
-    const exchangeRate = 1n; // TODO: Get exchange rate from AMM
-    const dollarValueAmount = amount * exchangeRate;
-
-    const collateralBalance = this._collateralBalances.get(onBehalfOf) ?? 0n;
-    this._collateralBalances.set(
-      onBehalfOf,
-      collateralBalance + dollarValueAmount
-    );
-
-    console.log(aToken.balanceOf([onBehalfOf]));
-
-    eventLogger.log({
-      type: "DEPOSIT",
-      message: `${metadata.sender} deposited ${amount} ${token} on behalf of ${onBehalfOf}`,
-    });
-
-    eventLogger.log({
-      type: "MINT_ATOKEN",
-      message: `Minted ${amount} a${token} for ${onBehalfOf}`,
-    });
+    reserve.configuration.setConfiguration(configruation);
   }
 
   /**
-   * Withdraw tokens from the lending pool, burns aTokens
-   * @param metadata - Metadata of the contract
-   * @param args - Arguments for the contract
-   * @param eventLogger - Event logger
-   * @param ecosystem - Ecosystem
+   * @dev Retrieves the configuration of a specified reserve asset.
+   * @param args The parameters containing the asset information.
+   * @return The configuration of the specified reserve as a ReserveConfiguration object.
+   * @throws Error if the reserve for the specified asset is not found.
    */
-  async withdraw({ metadata, args, eventLogger, ecosystem }: ContractParams) {
-    const schema = z.tuple([z.string(), zUtils.bigint(), z.string()]);
-    const [token, amount, to] = argsParsing(schema, args, "withdraw");
+  getConfiguration({ args }: ContractParams): ReserveConfiguration {
+    const schema = z.tuple([z.string()]);
+    const [asset] = argsParsing(schema, args, "getConfiguration");
+    const reserve = this._reserves.get(asset);
 
-    const Token = await ecosystem.getContractObj<LRC20Base>(token);
-    if (!Token) throw new ExecutionError(`${token} contract not found`);
-
-    const aToken = await ecosystem.getContractObj<aTokenTemplate>(`a${token}`);
-
-    if (!aToken) {
-      throw new ExecutionError(
-        `a${token} contract not found or failed to deploy`
-      );
+    if (!reserve) {
+      throw new Error(`Reserve with asset ${asset} not found`);
     }
 
-    const aTokenBalances = aToken.balanceOf([to]);
-    console.log(aTokenBalances);
+    return reserve.configuration;
+  }
 
-    if (aTokenBalances < amount) {
-      throw new ExecutionError("withdraw: not enough aToken balance");
+  /**
+   * @dev Returns the state and configuration of the reserve
+   * @param asset The address of the underlying asset of the reserve
+   * @return The state of the reserve
+   **/
+  getReserveData({ args }: ContractParams): ReserveData {
+    const schema = z.tuple([z.string()]);
+    const [asset] = argsParsing(schema, args, "getConfiguration");
+    const reserve = this._reserves.get(asset);
+
+    if (!reserve) {
+      throw new Error(`Reserve with asset ${asset} not found`);
     }
 
-    const collateralBalance = this._collateralBalances.get(to);
-    if (!collateralBalance) {
-      throw new ExecutionError("withdraw: collateral balance not found");
-    }
-
-    aToken.burn([to, amount]);
-    Token.transfer([metadata.sender, amount]);
-
-    const exchangeRate = 1n; // TODO: Get exchange rate from AMM
-    const dollarValueAmount = amount * exchangeRate;
-
-    this._collateralBalances.set(token, collateralBalance - dollarValueAmount);
-
-    console.log(aToken.balanceOf([metadata.sender]));
-
-    eventLogger.log({
-      type: "WITHDRAW",
-      message: `${to} withdraw ${amount} ${token} to ${metadata.sender}`,
-    });
-
-    eventLogger.log({
-      type: "BURN_ATOKEN",
-      message: `Burned ${amount} a${token} from ${to}`,
-    });
+    return reserve;
   }
 
   /**
    * Get the balance of a user
    * @param args - Arguments for the contract
    */
-
   balance({ args }: ContractParams): Map<string, bigint> {
     const schema = z.tuple([z.string()]);
     const [user] = argsParsing(schema, args, "balance");
@@ -488,7 +121,6 @@ export default class LendingPool implements Contract {
    * Get the total balance of a token
    * @param args - Arguments for the contract
    */
-
   totalBalance({ args }: ContractParams): Map<string, bigint> {
     const schema = z.tuple([z.string()]);
     const [token] = argsParsing(schema, args, "totalBalance");
@@ -496,242 +128,17 @@ export default class LendingPool implements Contract {
   }
 
   /**
-   * Borrow tokens from the lending pool, requires collateral
-   * @param metadata - Metadata of the contract
-   * @param args - Arguments for the contract
-   * @param eventLogger - Event logger
-   * @param ecosystem - Ecosystem, contains all the contracts
-   */
-
-  // async borrow({ metadata, args, eventLogger, ecosystem }: ContractParams) {
-  //   // TO DO: Check borrow logic
-  //   const schema = z.tuple([z.string(), zUtils.bigint(), z.string()]);
-  //   console.log("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", args);
-
-  //   let [asset, amount, onBehalfOf] = argsParsing(schema, args, "borrow");
-  //   const token = await ecosystem.getContractObj<LRC20Base>(asset);
-  //   if (!token) throw new ExecutionError("Token contract not found");
-
-  //   const collateralPercentage = BigInt(this._collateralFactor * 100);
-  //   const requiredCollateral = (collateralPercentage * amount) / 100n;
-  //   const collateral = this._collateralBalances.get(metadata.sender) ?? 10n;
-  //   console.log(collateral);
-  //   if (collateral <= 0n) {
-  //     throw new ExecutionError("Not enough collateral");
-  //   }
-
-  //   token.transfer([onBehalfOf, amount]);
-  //   this._collateralBalances.set(onBehalfOf, collateral - requiredCollateral);
-
-  //   const borrowedBalance =
-  //     this._borrowedBalances.get(onBehalfOf) ?? new Map<string, bigint>();
-  //   borrowedBalance.set(asset, borrowedBalance.get(asset) ?? 0n + amount);
-
-  //   const totalBalance = this._totalBalances.get(asset) ?? 0n;
-  //   this._totalBalances.set(asset, totalBalance + amount);
-
-  //   eventLogger.log({
-  //     type: "BORROW",
-  //     message: `${onBehalfOf} borrowed ${amount} ${asset} for ${metadata.sender}`,
-  //   });
-  // }
-  async borrow({ metadata, args, eventLogger, ecosystem }: ContractParams) {
-    const schema = z.tuple([
-      z.string(), // asset
-      zUtils.bigint(), // amount
-      z.number(), // interestRateMode (e.g. stable or variable)
-      z.number(), // referralCode
-      z.string(), // onBehalfOf
-    ]);
-
-    const [asset, amount, interestRateMode, referralCode, onBehalfOf] =
-      argsParsing(schema, args, "borrow");
-    const reserve = this._reserves.get(asset);
-
-    if (!reserve) {
-      throw new ExecutionError("Reserve not found");
-    }
-
-    // Execute borrow logic
-    await this._executeBorrow({
-      asset,
-      user: metadata.sender,
-      onBehalfOf,
-      amount,
-      interestRateMode,
-      aTokenAddress: reserve.aTokenAddress,
-      referralCode,
-      releaseUnderlying: true,
-      ecosystem,
-    });
-
-    eventLogger.log({
-      type: "BORROW",
-      message: `${onBehalfOf} borrowed ${amount} ${asset} for ${metadata.sender}`,
-    });
-  }
-
-  async _executeBorrow({
-    asset,
-    user,
-    onBehalfOf,
-    amount,
-    interestRateMode,
-    aTokenAddress,
-    referralCode,
-    releaseUnderlying,
-    ecosystem,
-  }: {
-    asset: string;
-    user: string;
-    onBehalfOf: string;
-    amount: bigint;
-    interestRateMode: number;
-    aTokenAddress: string;
-    referralCode: number;
-    releaseUnderlying: boolean;
-    ecosystem: Ecosystem;
-  }) {
-    const reserve = this._reserves.get(asset);
-    if (!reserve) throw new ExecutionError("Reserve not found");
-
-    const userConfig = this._usersConfig.get(onBehalfOf);
-
-    if (!userConfig) {
-      throw new ExecutionError("User config not found");
-    }
-
-    const oracle = await ecosystem.getContractObj<Oracle>("Oracle");
-
-    if (!oracle) {
-      throw new ExecutionError("Oracle not found");
-    }
-
-    const assetPrice = await oracle.getAssetPrice([asset]);
-
-    if (!assetPrice) {
-      throw new ExecutionError("Oracle asset price not found");
-    }
-
-    const amountInPUSD =
-      (assetPrice * amount) / 10n ** reserve.configuration.getDecimals();
-
-    // Validate borrow request
-    await this._validationLogic.validateBorrow(
-      asset,
-      reserve,
-      onBehalfOf,
-      amount,
-      amountInPUSD,
-      interestRateMode,
-      this._maxStableRateBorrowSizePercent,
-      this._reserves,
-      userConfig,
-      Array.from(this._reserves.keys()),
-      this._reserves.values.length,
-      "Oracle",
-      ecosystem
-    );
-
-    // Update reserve state before minting
-    await reserve.updateState(ecosystem);
-
-    let isFirstBorrowing = false;
-    let currentRate = 0n;
-
-    // Determine if stable or variable rate
-    // if (interestRateMode === 1) {
-    //   // STABLE
-    //   currentRate = reserve.currentStableBorrowRate;
-    //   const stableDebtToken = await ecosystem.getContractObj<VariableDebtToken>(
-    //     reserve.stableDebtTokenAddress
-    //   );
-    //   isFirstBorrowing = await stableDebtToken.mint([
-    //     user,
-    //     onBehalfOf,
-    //     amount,
-    //     currentRate,
-    //   ]);
-    // } else {
-    //   const variableDebtToken =
-    //     await ecosystem.getContractObj<VariableDebtToken>(
-    //       reserve.variableDebtTokenAddress
-    //     );
-    //   isFirstBorrowing = await variableDebtToken.mint([
-    //     user,
-    //     onBehalfOf,
-    //     amount,
-    //     reserve.variableBorrowIndex,
-    //   ]);
-    // }
-
-    // if (isFirstBorrowing) {
-    //   userConfig.setBorrowing(reserve.id, true);
-    // }
-
-    // // Update interest rates
-    // await reserve.updateInterestRates({
-    //   asset,
-    //   aTokenAddress,
-    //   amount: releaseUnderlying ? amount : 0n,
-    // });
-
-    // if (releaseUnderlying) {
-    //   const aToken = await ecosystem.getContractObj<any>(aTokenAddress);
-    //   await aToken.transferUnderlyingTo([user, amount]);
-    // }
-
-    // eventLogger.log({
-    //   type: "BORROW_EXECUTED",
-    //   message: `${user} executed a borrow of ${amount} ${asset} on behalf of ${onBehalfOf}`,
-    // });
-  }
-
-  /**
-   * Repay borrowed tokens, requires collateral to be deposited
-   * @param metadata - Metadata of the contract
-   * @param args - Arguments for the contract
-   * @param eventLogger - Event logger
-   *  @param ecosystem - Ecosystem, contains all the contracts
-   */
-
-  async repay({ metadata, args, eventLogger, ecosystem }: ContractParams) {
-    const schema = z.tuple([z.string(), zUtils.bigint(), z.string()]);
-    const [asset, amount, onBehalfOf] = argsParsing(schema, args, "repay");
-
-    const collateralBalance =
-      this._collateralBalances.get(metadata.sender) ?? 0n;
-    const borrowedBalance =
-      this._borrowedBalances.get(metadata.sender) ?? new Map<string, bigint>();
-    const borrowedTokenBalance = borrowedBalance.get(asset) ?? 0n;
-    const repayCollateral =
-      (BigInt(this._collateralFactor * 100) * amount) / 100n;
-
-    const token = await ecosystem.getContractObj<LRC20Base>(asset);
-    if (!token) throw new ExecutionError("Token contract not found");
-
-    token.transferFrom([metadata.sender, metadata.currentContract, amount]);
-
-    borrowedBalance.set(asset, borrowedTokenBalance - amount);
-    this._borrowedBalances.set(onBehalfOf, borrowedBalance);
-
-    this._collateralBalances.set(
-      onBehalfOf,
-      collateralBalance + repayCollateral
-    );
-
-    eventLogger.log({
-      type: "REPAY",
-      message: `${metadata.sender} repaid ${amount} ${asset} for ${onBehalfOf}`,
-    });
-  }
-
-  /**
    * @dev Returns the normalized variable debt per unit of asset
    * @param asset The address (or unique identifier) of the underlying asset of the reserve
    * @return The reserve normalized variable debt
    */
-  getReserveNormalizedVariableDebt(asset: string): bigint {
+  getReserveNormalizedVariableDebt({ args }: ContractParams): bigint {
+    const schema = z.tuple([z.string()]);
+    const [asset] = argsParsing(
+      schema,
+      args,
+      "getReserveNormalizedVariableDebt"
+    );
     const reserve = this._reserves.get(asset);
     if (!reserve) {
       throw new Error(`Reserve for asset ${asset} not found`);
@@ -739,6 +146,20 @@ export default class LendingPool implements Contract {
     return this._reserveLogic.getNormalizedDebt(reserve);
   }
 
+  /**
+   * @dev Retrieves the user's account data, including collateral balances, borrowed balances, and health factor.
+   *
+   * This function takes a user address as input and returns an object containing:
+   * - totalCollateralETH: The total collateral balance of the user in ETH.
+   * - totalBorrowsETH: The total borrowed balance of the user in ETH (as a Map).
+   * - availableBorrowsETH: The amount that can be borrowed by the user (currently set to 0n).
+   * - currentLiquidationThreshold: The threshold for liquidation (currently set to 0n).
+   * - ltv: Loan-to-value ratio (currently set to 0n).
+   * - healthFactor: The user's health factor, indicating their account's risk level.
+   *
+   * @param args - The function parameters containing the user address.
+   * @returns An object with the user's account data.
+   */
   getUserAccountData({ args }: ContractParams) {
     const schema = z.tuple([z.string()]);
     const [user] = argsParsing(schema, args, "getUserAccountData");
@@ -757,6 +178,516 @@ export default class LendingPool implements Contract {
     };
   }
 
+  /**
+   * @dev Initializes a reserve, activating it, assigning an aToken and debt tokens and an
+   * interest rate strategy
+   * - Only callable by the LendingPoolConfigurator contract
+   * @param asset The address of the underlying asset of the reserve
+   * @param aTokenAddress The address of the aToken that will be assigned to the reserve
+   * @param stableDebtAddress The address of the StableDebtToken that will be assigned to the reserve
+   * @param variableDebtAddress The address of the VariableDebtToken that will be assigned to the reserve
+   * @param interestRateStrategyAddress The address of the interest rate strategy contract
+   */
+  public async initReserve({
+    metadata,
+    args,
+    eventLogger,
+    ecosystem,
+  }: ContractParams) {
+    this._onlyLendingPoolConfigurator(metadata.sender);
+    const schema = z.tuple([
+      z.string(),
+      z.string(),
+      z.string(),
+      z.string(),
+      z.string(),
+    ]);
+    const [
+      asset,
+      aTokenAddress,
+      stableDebtAddress,
+      variableDebtAddress,
+      interestRateStrategyAddress,
+    ] = argsParsing(schema, args, "initReserve");
+
+    let reserve = this._reserves.get(asset);
+
+    if (!reserve) {
+      this._reserves.set(asset, new ReserveData());
+      reserve = this._reserves.get(asset);
+    }
+
+    if (!reserve) {
+      throw new Error("Failed to initialize reserve");
+    }
+
+    // Initialize the reserve
+    reserve.initReserveData(
+      reserve,
+      aTokenAddress,
+      stableDebtAddress,
+      variableDebtAddress,
+      interestRateStrategyAddress
+    );
+
+    this._addReserveToList(asset);
+
+    eventLogger.log({
+      type: EventTypes.RESERVE_INITIALIZED,
+      message: `Initialized reserve for asset: ${asset}, aToken: ${aTokenAddress}, stableDebtToken: ${stableDebtAddress}, variableDebtToken: ${variableDebtAddress}, interestRateStrategy: ${interestRateStrategyAddress}`,
+    });
+  }
+
+  /**
+   * deposit tokens to the lending pool, gives aTokens in return
+   * @param metadata - Metadata of the contract
+   * @param args - Arguments for the contract
+   * @param eventLogger - Event logger
+   * @param ecosystem - Ecosystem
+   */
+  async deposit({ metadata, args, eventLogger, ecosystem }: ContractParams) {
+    const schema = z.tuple([z.string(), zUtils.bigint(), z.string()]);
+    const [token, amount, onBehalfOf] = argsParsing(schema, args, "deposit");
+
+    const reserve = this._reserves.get(token);
+
+    if (!reserve) {
+      throw new ExecutionError("Reserve not found");
+    }
+
+    await this._validationLogic.validateDeposit(reserve, amount);
+
+    await reserve.updateState(reserve, ecosystem);
+
+    await reserve.updateInterestRates(
+      token,
+      reserve.aTokenAddress,
+      amount,
+      0n,
+      ecosystem
+    );
+
+    const aToken = await loadContract<AToken>(ecosystem, reserve.aTokenAddress);
+
+    const Token = await loadContract<LRC20Base>(ecosystem, token);
+
+    await Token.transferFrom([metadata.sender, reserve.aTokenAddress, amount]);
+
+    const totalBalance = this._totalBalances.get(token) ?? 0n;
+    this._totalBalances.set(token, totalBalance + amount);
+
+    const isFirstDeposit = await aToken.mintAToken([
+      onBehalfOf,
+      amount,
+      reserve.liquidityIndex,
+    ]);
+
+    if (isFirstDeposit && reserve.id !== undefined) {
+      let userConfig = this._usersConfig.get(onBehalfOf);
+
+      if (!userConfig) {
+        userConfig = new UserConfiguration();
+        this._usersConfig.set(onBehalfOf, userConfig);
+      }
+      userConfig.setUsingAsCollateral(reserve.id, true);
+    }
+
+    eventLogger.log({
+      type: EventTypes.DEPOSITED,
+      message: `${metadata.sender} deposited ${amount} ${token} on behalf of ${onBehalfOf}`,
+    });
+
+    eventLogger.log({
+      type: EventTypes.MINT_ATOKEN,
+      message: `Minted ${amount} a${token} for ${onBehalfOf}`,
+    });
+  }
+
+  /**
+   * Borrow tokens from the lending pool, requires collateral
+   * @param metadata - Metadata of the contract
+   * @param args - Arguments for the contract
+   * @param eventLogger - Event logger
+   * @param ecosystem - Ecosystem, contains all the contracts
+   */
+  async borrow({ metadata, args, eventLogger, ecosystem }: ContractParams) {
+    const schema = z.tuple([
+      z.string(), // asset
+      zUtils.bigint(), // amount
+      z.number(), // interestRateMode (e.g. stable or variable)
+      z.string(), // onBehalfOf
+    ]);
+
+    const [asset, amount, interestRateMode, onBehalfOf] = argsParsing(
+      schema,
+      args,
+      "borrow"
+    );
+    const reserve = this._reserves.get(asset);
+
+    if (!reserve) {
+      throw new ExecutionError("Reserve not found");
+    }
+
+    // Execute borrow logic
+    await this._executeBorrow({
+      asset,
+      user: metadata.sender,
+      onBehalfOf,
+      amount,
+      interestRateMode,
+      aTokenAddress: reserve.aTokenAddress,
+      releaseUnderlying: true,
+      ecosystem,
+    });
+
+    eventLogger.log({
+      type: EventTypes.BORROWED,
+      message: `${onBehalfOf} borrowed ${amount} ${asset} for ${metadata.sender}`,
+    });
+  }
+
+  async _executeBorrow({
+    asset,
+    user,
+    onBehalfOf,
+    amount,
+    interestRateMode,
+    aTokenAddress,
+    releaseUnderlying,
+    ecosystem,
+  }: {
+    asset: string;
+    user: string;
+    onBehalfOf: string;
+    amount: bigint;
+    interestRateMode: number;
+    aTokenAddress: string;
+    releaseUnderlying: boolean;
+    ecosystem: Ecosystem;
+  }) {
+    const reserve = this._reserves.get(asset);
+    if (!reserve) throw new ExecutionError("Reserve not found");
+
+    const userConfig = this._usersConfig.get(onBehalfOf);
+
+    if (!userConfig) {
+      throw new ExecutionError("User config not found");
+    }
+
+    const oracleInctance = await loadContract<Oracle>(
+      ecosystem,
+      this._priceOracle
+    );
+
+    const assetPrice = await oracleInctance.getAssetPrice([asset]);
+
+    if (!assetPrice) {
+      throw new ExecutionError("Oracle asset price not found");
+    }
+
+    const amountInPUSD =
+      (assetPrice * amount) /
+      10n ** BigInt(reserve.configuration.getDecimals());
+
+    // Validate borrow request
+    await this._validationLogic.validateBorrow(
+      asset,
+      reserve,
+      onBehalfOf,
+      amount,
+      amountInPUSD,
+      interestRateMode,
+      this._maxStableRateBorrowSizePercent,
+      this._reserves,
+      userConfig,
+      Array.from(this._reserves.keys()),
+      Array.from(this._reserves.keys()).length,
+      this._priceOracle,
+      ecosystem
+    );
+
+    // Update reserve state before minting
+    await reserve.updateState(reserve, ecosystem);
+
+    let isFirstBorrowing = false;
+    let currentRate = 0n;
+
+    // Determine if stable or variable rate
+    if (interestRateMode === 1) {
+      // STABLE
+      currentRate = reserve.currentStableBorrowRate;
+      const stableDebtTokenInctance = await loadContract<StableDebtToken>(
+        ecosystem,
+        reserve.stableDebtTokenAddress
+      );
+
+      isFirstBorrowing = await stableDebtTokenInctance.mintStableDeptToken([
+        user,
+        onBehalfOf,
+        amount,
+        currentRate,
+      ]);
+    } else {
+      const variableDebtToken = await loadContract<VariableDebtToken>(
+        ecosystem,
+        reserve.stableDebtTokenAddress
+      );
+
+      isFirstBorrowing = await variableDebtToken.mintVariableDeptToken([
+        user,
+        onBehalfOf,
+        amount,
+        reserve.variableBorrowIndex,
+      ]);
+    }
+
+    if (isFirstBorrowing && reserve.id !== undefined) {
+      userConfig.setBorrowing(reserve.id, true);
+    }
+
+    // Update interest rates
+    await reserve.updateInterestRates(
+      asset,
+      aTokenAddress,
+      0n,
+      releaseUnderlying ? amount : 0n,
+      ecosystem
+    );
+
+    if (releaseUnderlying) {
+      const aToken = await loadContract<AToken>(ecosystem, aTokenAddress);
+      await aToken.transferUnderlyingTo([user, amount]);
+    }
+  }
+
+  /**
+   * @dev Withdraws an `amount` of underlying asset from the reserve, burning the equivalent aTokens owned
+   * E.g. User has 100 aUSDC, calls withdraw() and receives 100 USDC, burning the 100 aUSDC
+   * @param asset The address of the underlying asset to withdraw
+   * @param amount The underlying amount to be withdrawn
+   *   - Send the value type(uint256).max in order to withdraw the whole aToken balance
+   * @param to Address that will receive the underlying, same as msg.sender if the user
+   *   wants to receive it on his own wallet, or a different address if the beneficiary is a
+   *   different wallet
+   * @return The final amount withdrawn
+   **/
+  public async withdraw({
+    metadata,
+    args,
+    eventLogger,
+    ecosystem,
+  }: ContractParams): Promise<bigint> {
+    const schema = z.tuple([z.string(), zUtils.bigint(), z.string()]);
+    const [asset, amount, to] = argsParsing(schema, args, "withdraw");
+
+    const reserve = this._reserves.get(asset);
+    if (!reserve) throw new Error("Reserve not found");
+
+    const aTokenInctance = await loadContract<AToken>(
+      ecosystem,
+      reserve.aTokenAddress
+    );
+    const userBalance = aTokenInctance.balanceOf([to]);
+
+    let amountToWithdraw = amount;
+
+    if (amount === BigInt(Number.MAX_SAFE_INTEGER)) {
+      amountToWithdraw = userBalance;
+    }
+
+    await this._validationLogic.validateWithdraw(
+      asset,
+      amountToWithdraw,
+      userBalance,
+      this._reserves,
+      this._usersConfig.get(to)!,
+      Array.from(this._reserves.keys()),
+      this._reserves.size,
+      this._priceOracle,
+      ecosystem,
+      metadata
+    );
+
+    reserve.updateState(reserve, ecosystem);
+    reserve.updateInterestRates(
+      asset,
+      reserve.aTokenAddress,
+      0n,
+      amountToWithdraw,
+      ecosystem
+    );
+
+    if (amountToWithdraw === userBalance && reserve.id !== undefined) {
+      this._usersConfig.get(to)!.setUsingAsCollateral(reserve.id, false);
+    }
+
+    await aTokenInctance.burn([
+      to,
+      to,
+      amountToWithdraw,
+      reserve.liquidityIndex,
+    ]);
+
+    eventLogger.log({
+      type: EventTypes.WITHDRAWN,
+      message: `Withdrawn ${amountToWithdraw} of ${asset} to ${to}.`,
+    });
+    return amountToWithdraw;
+  }
+
+  /**
+   * @notice Repays a borrowed `amount` on a specific reserve, burning the equivalent debt tokens owned
+   * - E.g. User repays 100 USDC, burning 100 variable/stable debt tokens of the `onBehalfOf` address
+   * @param asset The address of the borrowed underlying asset previously borrowed
+   * @param amount The amount to repay
+   * - Send the value type(uint256).max in order to repay the whole debt for `asset` on the specific `debtMode`
+   * @param rateMode The interest rate mode at of the debt the user wants to repay: 1 for Stable, 2 for Variable
+   * @param onBehalfOf Address of the user who will get his debt reduced/removed. Should be the address of the
+   * user calling the function if he wants to reduce/remove his own debt, or the address of any other
+   * other borrower whose debt should be removed
+   * @return The final amount repaid
+   **/
+  async repay({
+    metadata,
+    args,
+    eventLogger,
+    ecosystem,
+  }: ContractParams): Promise<bigint> {
+    const schema = z.tuple([
+      z.string(),
+      zUtils.bigint(),
+      z.number(),
+      z.string(),
+    ]);
+    const [asset, amount, rateMode, onBehalfOf] = argsParsing(
+      schema,
+      args,
+      "repay"
+    );
+
+    const reserve = this._reserves.get(asset);
+    if (!reserve) {
+      throw new ExecutionError("Reserve not found");
+    }
+
+    const userConfig = this._usersConfig.get(onBehalfOf);
+    if (!userConfig) {
+      throw new ExecutionError("User config not found");
+    }
+
+    const [stableDebt, variableDebt] = await Helpers.getUserCurrentDebt(
+      onBehalfOf,
+      reserve,
+      ecosystem
+    );
+
+    const interestRateMode =
+      rateMode === 1 ? InterestRateMode.STABLE : InterestRateMode.VARIABLE;
+
+    // Validate the repayment
+    await this._validationLogic.validateRepay({
+      reserve,
+      amountSent: amount,
+      rateMode: interestRateMode,
+      onBehalfOf,
+      stableDebt,
+      variableDebt,
+      metadata,
+    });
+
+    // Determine the actual amount to repay
+    let paybackAmount =
+      interestRateMode === InterestRateMode.STABLE ? stableDebt : variableDebt;
+
+    if (amount < paybackAmount) {
+      paybackAmount = amount;
+    }
+
+    await reserve.updateState(reserve, ecosystem);
+
+    if (interestRateMode === InterestRateMode.STABLE) {
+      const stableDebtToken = await loadContract<StableDebtToken>(
+        ecosystem,
+        reserve.stableDebtTokenAddress
+      );
+      await stableDebtToken.burn([onBehalfOf, paybackAmount]);
+    } else {
+      const variableDebtToken = await loadContract<VariableDebtToken>(
+        ecosystem,
+        reserve.variableDebtTokenAddress
+      );
+      await variableDebtToken.burn([
+        onBehalfOf,
+        paybackAmount,
+        reserve.variableBorrowIndex,
+      ]);
+    }
+
+    await reserve.updateInterestRates(
+      asset,
+      reserve.aTokenAddress,
+      paybackAmount,
+      0n,
+      ecosystem
+    );
+
+    // Check if the user's total debt is cleared and update user config
+    if (
+      stableDebt + variableDebt - BigInt(paybackAmount) === 0n &&
+      reserve.id !== undefined
+    ) {
+      userConfig.setBorrowing(reserve.id, false);
+    }
+
+    // Transfer the repayment amount from the user to the aToken
+    const assetToken = await loadContract<LRC20Base>(ecosystem, asset);
+    await assetToken.transferFrom([
+      metadata.sender,
+      reserve.aTokenAddress,
+      paybackAmount,
+    ]);
+
+    // Handle repayment in the aToken contract
+    const aTokenContract = await loadContract<AToken>(
+      ecosystem,
+      reserve.aTokenAddress
+    );
+    aTokenContract.handleRepayment([metadata.sender, paybackAmount]);
+
+    eventLogger.log({
+      type: "REPAY",
+      message: `${onBehalfOf} repaid ${paybackAmount} ${asset} for ${metadata.sender}`,
+    });
+
+    return paybackAmount;
+  }
+
+  /**
+   * @dev Executes the liquidation of a user's collateral when they have insufficient funds to cover their debt.
+   *
+   * This function performs the following steps:
+   * - Parses the input arguments, which include:
+   *   - collateralAsset: The address of the collateral asset.
+   *   - debtAsset: The address of the debt asset.
+   *   - user: The address of the user being liquidated.
+   *   - debtToCover: The amount of debt to be covered in the liquidation.
+   *   - receiveAToken: A boolean indicating whether to receive aTokens as a result of the liquidation.
+   *
+   * - Checks if the user has sufficient borrowed tokens to cover the debt to be liquidated.
+   * - Calculates the required collateral based on the collateral factor and the debt to cover.
+   * - Validates that the user has enough collateral to support the liquidation.
+   * - Loads the token contracts for the debt and collateral assets from the ecosystem.
+   * - Transfers the specified amount of debt tokens from the user to the liquidator (metadata.sender).
+   * - Transfers the required amount of collateral from the user to the liquidator.
+   * - Updates the user's borrowed and collateral balances in the state.
+   * - Logs the liquidation event with details of the transaction.
+   *
+   * @param metadata - The metadata containing information about the transaction sender.
+   * @param args - The function parameters containing the necessary details for the liquidation.
+   * @param eventLogger - The event logger for recording the liquidation event.
+   * @param ecosystem - The ecosystem containing the token contracts.
+   */
   async liquidationCall({
     metadata,
     args,
@@ -790,12 +721,11 @@ export default class LendingPool implements Contract {
       throw new ExecutionError("liquidationCall: not enough collateral");
     }
 
-    const token = await ecosystem.getContractObj<LRC20Base>(debtAsset);
-    const collateralAssetToken =
-      await ecosystem.getContractObj<LRC20Base>(collateralAsset);
-    if (!token) throw new ExecutionError("Token contract not found");
-    if (!collateralAssetToken)
-      throw new ExecutionError("Collateral asset contract not found");
+    const token = await loadContract<LRC20Base>(ecosystem, debtAsset);
+    const collateralAssetToken = await loadContract<LRC20Base>(
+      ecosystem,
+      collateralAsset
+    );
 
     token.transfer([metadata.sender, debtToCover]);
     collateralAssetToken.transfer([user, requiredCollateral]);
@@ -806,8 +736,47 @@ export default class LendingPool implements Contract {
     this._collateralBalances.set(user, collateralBalance - requiredCollateral);
 
     eventLogger.log({
-      type: "LIQUIDATION",
+      type: EventTypes.LIQUIDATION,
       message: `${metadata.sender} liquidated ${debtToCover} ${debtAsset} for ${user}`,
     });
+  }
+
+  /**
+   * @dev Adds a reserve asset to the internal reserves list.
+   *
+   * This function performs the following checks and actions:
+   * - Verifies if the current number of reserves has reached the maximum limit.
+   *   If so, it throws an error indicating no more reserves are allowed.
+   * - Retrieves the reserve associated with the specified asset from the reserves map.
+   * - If the reserve does not exist, the function returns early.
+   * - Checks if the reserve has already been added by verifying its ID
+   *   or if it is the first asset in the reserves list.
+   * - If the reserve has not been added yet:
+   *   - Assigns a unique ID to the reserve based on the current reserves count.
+   *   - Adds the asset to the reserves list at the current reserves count index.
+   *   - Increments the reserves count by one.
+   *
+   * @param asset - The address of the reserve asset to be added.
+   */
+  private _addReserveToList(asset: string): void {
+    const reservesCount = this._reservesCount;
+
+    if (reservesCount >= this._maxNumberOfReserves) {
+      throw new Error(Errors.LP_NO_MORE_RESERVES_ALLOWED);
+    }
+    const reserve = this._reserves.get(asset);
+    if (!reserve) {
+      return;
+    }
+
+    const reserveAlreadyAdded =
+      reserve.id !== undefined || this._reservesList[0] === asset;
+
+    if (!reserveAlreadyAdded) {
+      reserve.id = reservesCount;
+      this._reservesList[reservesCount] = asset;
+
+      this._reservesCount++;
+    }
   }
 }
