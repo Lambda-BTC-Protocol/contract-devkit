@@ -45,7 +45,7 @@ export async function engine(inscription: Inscription, metadata: Metadata) {
       } satisfies TransactionLog;
 
       logger.addLog(log);
-      console.log(persistenceStorage);
+      // console.log(persistenceStorage);
     } catch (e: any) {
       console.error(e);
       // reset state
