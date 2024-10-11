@@ -1,4 +1,8 @@
 
+# DEPRECATION
+
+**This repo is deprecated use https://github.com/Lambda-BTC-Protocol/lambda-dev-kit**
+
 ## Getting Started
 
 First, install all dependencies with:
